@@ -18,10 +18,13 @@ from sklearn.base import BaseEstimator
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.validation import check_array, check_consistent_length, check_is_fitted
 
-from .util import check_y_survival
+from .util import check_y_survival, check_y_survival_interval_censored
 
 __all__ = [
     "CensoringDistributionEstimator",
+    "turnbull_interval_censored",
+    "SurvivalFunctionEstimatorIntervalCensored",
+    "CensoringDistributionEstimatorIntervalCensored",
     "kaplan_meier_estimator",
     "nelson_aalen_estimator",
     "ipc_weights",
@@ -680,41 +683,6 @@ def turnbull_interval_censored(left_bound, right_bound, event, conf_level=0.95, 
         return uniq_times, prob_survival, conf_int
 
     return uniq_times, np.cumprod(prob)
-
-
-def check_y_survival_interval_censored(y):
-    """Check that array correctly represents an outcome for interval-censored survival analysis.
-
-    Parameters
-    ----------
-    y : structured array with two fields
-        A structured array containing the binary event indicator as first field,
-        and times of event or censoring as second field, in the form of a 2d array
-        with one row per sample and columns 'left_bound' and 'right_bound'.
-
-    Returns
-    -------
-    event : array, shape = (n_samples,)
-        Binary event indicator.
-
-    left_bound : array, shape = (n_samples,)
-        Left interval bound.
-
-    right_bound : array, shape = (n_samples,)
-        Right interval bound.
-    """
-    event = y["event"]
-    if not np.issubdtype(event.dtype, np.bool_):
-        raise ValueError("elements of event indicator must be boolean, but found {0}".format(event.dtype))
-
-    left_bound = y["left_bound"]
-    right_bound = y["right_bound"]
-    check_consistent_length(event, left_bound, right_bound)
-
-    if (left_bound > right_bound).any():
-        raise ValueError("left bound must be smaller than or equal to right bound")
-
-    return event, left_bound, right_bound
 
 
 class SurvivalFunctionEstimatorIntervalCensored(BaseEstimator):

@@ -17,8 +17,8 @@ from sklearn.utils.metaestimators import available_if
 from sklearn.utils.validation import check_is_fitted
 
 from .exceptions import NoComparablePairException
-from .nonparametric import CensoringDistributionEstimator, SurvivalFunctionEstimator, CensoringDistributionEstimatorIntervalCensored, check_y_survival_interval_censored, SurvivalFunctionEstimatorIntervalCensored
-from .util import check_y_survival
+from .nonparametric import CensoringDistributionEstimator, SurvivalFunctionEstimator, CensoringDistributionEstimatorIntervalCensored, SurvivalFunctionEstimatorIntervalCensored
+from .util import check_y_survival, check_y_survival_interval_censored
 
 __all__ = [
     "as_concordance_index_ipcw_scorer",

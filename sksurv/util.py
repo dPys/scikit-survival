@@ -15,7 +15,7 @@ import pandas as pd
 from pandas.api.types import CategoricalDtype
 from sklearn.utils import check_array, check_consistent_length
 
-__all__ = ["check_array_survival", "check_y_survival", "safe_concat", "Surv"]
+__all__ = ["check_array_survival", "check_y_survival", "check_y_survival_interval_censored", "safe_concat", "Surv"]
 
 
 class Surv:
@@ -172,6 +172,74 @@ def check_y_survival(y_or_event, *args, allow_all_censored=False, allow_time_zer
 
     return tuple(return_val)
 
+
+def check_y_survival_interval_censored(y, allow_all_censored=False, allow_time_zero=True):
+    """Check that array correctly represents an outcome for interval-censored survival analysis.
+
+    Parameters
+    ----------
+    y : structured array with three fields
+        A structured array containing the binary event indicator as first field,
+        and the left and right interval bounds as second and third fields, respectively.
+
+    allow_all_censored : bool, optional, default: False
+        Whether to allow all events to be censored.
+
+    allow_time_zero : bool, optional, default: True
+        Whether to allow interval bounds to be zero.
+
+    Returns
+    -------
+    event : array, shape=[n_samples,], dtype=bool
+        Binary event indicator.
+
+    left_bound : array, shape=[n_samples,], dtype=float
+        Left interval bound.
+
+    right_bound : array, shape=[n_samples,], dtype=float
+        Right interval bound.
+    """
+    if not isinstance(y, np.ndarray) or y.dtype.fields is None or len(y.dtype.fields) != 3:
+        raise ValueError(
+            "y must be a structured array with the first field being a binary class event indicator, "
+            "and the second and third fields being the left and right interval bounds, respectively."
+        )
+
+    event_field, left_field, right_field = y.dtype.names
+    event = y[event_field]
+    left_bound = y[left_field]
+    right_bound = y[right_field]
+
+    event = check_array(event, ensure_2d=False)
+    if not np.issubdtype(event.dtype, np.bool_):
+        raise ValueError(f"elements of event indicator must be boolean, but found {event.dtype}")
+
+    if not (allow_all_censored or np.any(event)):
+        raise ValueError("all samples are censored")
+
+    left_bound = check_array(left_bound, ensure_2d=False)
+    right_bound = check_array(right_bound, ensure_2d=False)
+
+    if not np.issubdtype(left_bound.dtype, np.number):
+        raise ValueError(f"left bound must be numeric, but found {left_bound.dtype}")
+
+    if not np.issubdtype(right_bound.dtype, np.number):
+        raise ValueError(f"right bound must be numeric, but found {right_bound.dtype}")
+
+    if allow_time_zero:
+        cond = (left_bound < 0) | (right_bound < 0)
+        msg = "interval bounds contain values smaller than zero"
+    else:
+        cond = (left_bound <= 0) | (right_bound <= 0)
+        msg = "interval bounds contain values smaller than or equal to zero"
+
+    if np.any(cond):
+        raise ValueError(msg)
+
+    if np.any(left_bound > right_bound):
+        raise ValueError("left bound must be smaller than or equal to right bound")
+
+    return event, left_bound, right_bound
 
 def check_array_survival(X, y, **kwargs):
     """Check that all arrays have consistent first dimensions.
