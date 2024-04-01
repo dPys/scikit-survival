@@ -586,3 +586,306 @@ class CensoringDistributionEstimator(SurvivalFunctionEstimator):
         weights[event] = 1.0 / Ghat
 
         return weights
+
+
+def turnbull_interval_censored(left_bound, right_bound, event, conf_level=0.95, conf_type=None):
+    """Turnbull estimator for interval-censored data.
+
+    Parameters
+    ----------
+    left_bound : array-like, shape = (n_samples,)
+        Left interval bound for each sample.
+
+    right_bound : array-like, shape = (n_samples,)
+        Right interval bound for each sample.
+
+    event : array-like, shape = (n_samples,)
+        Binary event indicator for each sample.
+
+    conf_level : float, optional, default: 0.95
+        The level for a two-sided confidence interval on the survival curves.
+
+    conf_type : None or {'log-log'}, optional, default: 'log-log'.
+        The type of confidence intervals to estimate.
+        If `None`, no confidence intervals are estimated.
+        If "log-log", estimate confidence intervals using
+        the log hazard or :math:`log(-log(S(t)))`.
+
+    Returns
+    -------
+    time : array, shape = (n_times,)
+        Unique times.
+
+    prob_survival : array, shape = (n_times,)
+        Survival probability at each unique time point.
+
+    conf_int : array, shape = (2, n_times)
+        Pointwise confidence interval of the survival function
+        at each unique time point.
+        Only provided if `conf_type` is not None.
+    """
+    unique_bounds = np.unique(np.concatenate((left_bound, right_bound)))
+
+    n_samples = len(left_bound)
+    n_bounds = len(unique_bounds)
+    prob = np.zeros(n_bounds)
+    uniq_times = unique_bounds
+
+    while True:
+        prev_prob = prob.copy()
+
+        n_events = np.zeros(n_bounds - 1)
+        n_at_risk = np.zeros(n_bounds - 1)
+        for i in range(n_samples):
+            if event[i]:
+                left_idx = np.searchsorted(unique_bounds, left_bound[i])
+                right_idx = np.searchsorted(unique_bounds, right_bound[i], side='right')
+                n_events[left_idx:right_idx] += 1
+            else:
+                left_idx = np.searchsorted(unique_bounds, left_bound[i])
+                right_idx = np.searchsorted(unique_bounds, right_bound[i], side='right')
+                n_at_risk[left_idx:right_idx] += 1
+
+        survival = 1.0
+        for i in range(n_bounds - 1):
+            if n_at_risk[i] > 0:
+                prob[i] = 1 - n_events[i] / n_at_risk[i]
+                survival *= prob[i]
+            else:
+                prob[i] = survival
+
+        if np.allclose(prob, prev_prob):
+            break
+
+    if conf_type is not None:
+        n_events = np.zeros(n_bounds)
+        n_censored = np.zeros(n_bounds)
+        for i in range(n_samples):
+            if event[i]:
+                idx = np.searchsorted(unique_bounds, right_bound[i], side='right')
+                n_events[idx - 1] += 1
+            else:
+                idx = np.searchsorted(unique_bounds, right_bound[i], side='right')
+                n_censored[idx - 1] += 1
+
+        prob_survival = np.cumprod(prob)
+        n_at_risk = n_samples - np.cumsum(n_events + n_censored)
+        ratio_var = np.divide(
+            n_events,
+            n_at_risk * (n_at_risk - n_events),
+            out=np.zeros(n_bounds, dtype=float),
+            where=(n_events != 0) & (n_at_risk != n_events),
+        )
+        conf_int = _km_ci_estimator(prob_survival, ratio_var, conf_level, conf_type)
+        return uniq_times, prob_survival, conf_int
+
+    return uniq_times, np.cumprod(prob)
+
+
+def check_y_survival_interval_censored(y):
+    """Check that array correctly represents an outcome for interval-censored survival analysis.
+
+    Parameters
+    ----------
+    y : structured array with two fields
+        A structured array containing the binary event indicator as first field,
+        and times of event or censoring as second field, in the form of a 2d array
+        with one row per sample and columns 'left_bound' and 'right_bound'.
+
+    Returns
+    -------
+    event : array, shape = (n_samples,)
+        Binary event indicator.
+
+    left_bound : array, shape = (n_samples,)
+        Left interval bound.
+
+    right_bound : array, shape = (n_samples,)
+        Right interval bound.
+    """
+    event = y["event"]
+    if not np.issubdtype(event.dtype, np.bool_):
+        raise ValueError("elements of event indicator must be boolean, but found {0}".format(event.dtype))
+
+    left_bound = y["left_bound"]
+    right_bound = y["right_bound"]
+    check_consistent_length(event, left_bound, right_bound)
+
+    if (left_bound > right_bound).any():
+        raise ValueError("left bound must be smaller than or equal to right bound")
+
+    return event, left_bound, right_bound
+
+
+class SurvivalFunctionEstimatorIntervalCensored(BaseEstimator):
+    """Turnbull estimator for the survival function with interval-censored data.
+
+    Parameters
+    ----------
+    conf_level : float, optional, default: 0.95
+        The level for a two-sided confidence interval on the survival curves.
+
+    conf_type : None or {'log-log'}, optional, default: 'log-log'.
+        The type of confidence intervals to estimate.
+        If `None`, no confidence intervals are estimated.
+        If "log-log", estimate confidence intervals using
+        the log hazard or :math:`log(-log(S(t)))`.
+    """
+
+    _parameter_constraints = {
+        "conf_level": [Interval(numbers.Real, 0.0, 1.0, closed="neither")],
+        "conf_type": [None, StrOptions({"log-log"})],
+    }
+
+    def __init__(self, conf_level=0.95, conf_type=None):
+        self.conf_level = conf_level
+        self.conf_type = conf_type
+
+    def fit(self, y):
+        """Estimate survival distribution from training data.
+
+        Parameters
+        ----------
+        y : structured array, shape = (n_samples,)
+            A structured array containing the binary event indicator
+            as first field, and times of event or censoring as
+            second field, in the form of a 2d array with one row
+            per sample and columns 'left_bound' and 'right_bound'.
+
+        Returns
+        -------
+        self
+        """
+        self._validate_params()
+        event, left_bound, right_bound = check_y_survival_interval_censored(y)
+
+        values = turnbull_interval_censored(left_bound, right_bound, event, conf_level=self.conf_level, conf_type=self.conf_type)
+        if self.conf_type is None:
+            unique_time, prob = values
+        else:
+            unique_time, prob, conf_int = values
+            self.conf_int_ = np.column_stack((np.ones((2, 1)), conf_int))
+
+        self.unique_time_ = np.r_[-np.infty, unique_time]
+        self.prob_ = np.r_[1.0, prob]
+
+        return self
+
+    def predict_proba(self, time, return_conf_int=False):
+        """Return probability of an event after given time point.
+
+        :math:`\\hat{S}(t) = P(T > t)`
+
+        Parameters
+        ----------
+        time : array, shape = (n_samples,)
+            Time to estimate probability at.
+
+        return_conf_int : bool, optional, default: False
+            Whether to return the pointwise confidence interval
+            of the survival function.
+            Only available if :meth:`fit()` has been called
+            with the `conf_type` parameter set.
+
+        Returns
+        -------
+        prob : array, shape = (n_samples,)
+            Probability of an event at the passed time points.
+
+        conf_int : array, shape = (2, n_samples)
+            Pointwise confidence interval at the passed time points.
+            Only provided if `return_conf_int` is True.
+        """
+        check_is_fitted(self, "unique_time_")
+        if return_conf_int and not hasattr(self, "conf_int_"):
+            raise ValueError(
+                "If return_conf_int is True, SurvivalFunctionEstimatorIntervalCensored must be fitted with conf_int != None"
+            )
+
+        time = check_array(time, ensure_2d=False, estimator=self, input_name="time")
+
+        # Turnbull estimator is undefined if estimate at last time point is non-zero
+        extends = time > self.unique_time_[-1]
+        if self.prob_[-1] > 0 and extends.any():
+            raise ValueError(f"time must be smaller than largest observed time point: {self.unique_time_[-1]}")
+
+        # beyond last time point is zero probability
+        Shat = np.empty(time.shape, dtype=float)
+        Shat[extends] = 0.0
+
+        valid = ~extends
+        time = time[valid]
+        idx = np.searchsorted(self.unique_time_, time)
+        # for non-exact matches, we need to shift the index to left
+        eps = np.finfo(self.unique_time_.dtype).eps
+        exact = np.absolute(self.unique_time_[idx] - time) < eps
+        idx[~exact] -= 1
+        Shat[valid] = self.prob_[idx]
+
+        if not return_conf_int:
+            return Shat
+
+        ci = np.empty((2, time.shape[0]), dtype=float)
+        ci[:, extends] = np.nan
+        ci[:, valid] = self.conf_int_[:, idx]
+        return Shat, ci
+
+
+class CensoringDistributionEstimatorIntervalCensored(SurvivalFunctionEstimatorIntervalCensored):
+    """Turnbull estimator for the censoring distribution with interval-censored data."""
+
+    def fit(self, y):
+        """Estimate censoring distribution from training data.
+
+        Parameters
+        ----------
+        y : structured array, shape = (n_samples,)
+            A structured array containing the binary event indicator
+            as first field, and times of event or censoring as
+            second field, in the form of a 2d array with one row
+            per sample and columns 'left_bound' and 'right_bound'.
+
+        Returns
+        -------
+        self
+        """
+        event, left_bound, right_bound = check_y_survival_interval_censored(y)
+
+        if event.all():
+            self.unique_time_ = np.unique(right_bound)
+            self.prob_ = np.ones(self.unique_time_.shape[0])
+        else:
+            unique_time, prob = turnbull_interval_censored(left_bound, right_bound, ~event)
+            self.unique_time_ = np.r_[-np.infty, unique_time]
+            self.prob_ = np.r_[1.0, prob]
+
+        return self
+
+    def predict_ipcw(self, y):
+        """Return inverse probability of censoring weights at given time points.
+
+        :math:`\\omega_i = \\delta_i / \\hat{G}(y_i)`
+
+        Parameters
+        ----------
+        y : structured array, shape = (n_samples,)
+            A structured array containing the binary event indicator
+            as first field, and times of event or censoring as
+            second field, in the form of a 2d array with one row
+            per sample and columns 'left_bound' and 'right_bound'.
+
+        Returns
+        -------
+        ipcw : array, shape = (n_samples,)
+            Inverse probability of censoring weights.
+        """
+        event, left_bound, right_bound = check_y_survival_interval_censored(y)
+        Ghat = self.predict_proba(right_bound[event])
+
+        if (Ghat == 0.0).any():
+            raise ValueError("censoring survival function is zero at one or more time points")
+
+        weights = np.zeros(left_bound.shape[0])
+        weights[event] = 1.0 / Ghat
+
+        return weights

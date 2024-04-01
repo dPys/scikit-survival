@@ -17,7 +17,7 @@ from sklearn.utils.metaestimators import available_if
 from sklearn.utils.validation import check_is_fitted
 
 from .exceptions import NoComparablePairException
-from .nonparametric import CensoringDistributionEstimator, SurvivalFunctionEstimator
+from .nonparametric import CensoringDistributionEstimator, SurvivalFunctionEstimator, CensoringDistributionEstimatorIntervalCensored, check_y_survival_interval_censored, SurvivalFunctionEstimatorIntervalCensored
 from .util import check_y_survival
 
 __all__ = [
@@ -329,8 +329,8 @@ def concordance_index_ipcw(survival_train, survival_test, estimate, tau=None, ti
     return _estimate_concordance_index(test_event, test_time, estimate, w, tied_tol)
 
 
-def cumulative_dynamic_auc(survival_train, survival_test, estimate, times, tied_tol=1e-8):
-    """Estimator of cumulative/dynamic AUC for right-censored time-to-event data.
+def cumulative_dynamic_auc(survival_train, survival_test, estimate, times, tied_tol=1e-8, censoring_type="interval"):
+    """Estimator of cumulative/dynamic AUC for interval-censored time-to-event data.
 
     The receiver operating characteristic (ROC) curve and the area under the
     ROC curve (AUC) can be extended to survival data by defining
@@ -416,6 +416,10 @@ def cumulative_dynamic_auc(survival_train, survival_test, estimate, times, tied_
         If the absolute difference between risk scores is smaller
         or equal than `tied_tol`, risk scores are considered tied.
 
+    censoring_type : str, optional, default: "right"
+        The type of censoring. Can be either "right" for right-censored data
+        or "interval" for interval-censored data.
+
     Returns
     -------
     auc : array, shape = (n_times,)
@@ -443,35 +447,43 @@ def cumulative_dynamic_auc(survival_train, survival_test, estimate, times, tied_
            "Summary measure of discrimination in survival models based on cumulative/dynamic time-dependent ROC curves,"
            Statistical Methods in Medical Research, 2014.
     """
-    test_event, test_time = check_y_survival(survival_test)
-    estimate, times = _check_estimate_2d(estimate, test_time, times, estimator="cumulative_dynamic_auc")
+    if censoring_type == "right":
+        test_event, test_time = check_y_survival(survival_test)
+        estimate, times = _check_estimate_2d(estimate, test_time, times, estimator="cumulative_dynamic_auc")
 
-    n_samples = estimate.shape[0]
-    n_times = times.shape[0]
-    if estimate.ndim == 1:
-        estimate = np.broadcast_to(estimate[:, np.newaxis], (n_samples, n_times))
+        n_samples = estimate.shape[0]
+        n_times = times.shape[0]
+        if estimate.ndim == 1:
+            estimate = np.broadcast_to(estimate[:, np.newaxis], (n_samples, n_times))
 
-    # fit and transform IPCW
-    cens = CensoringDistributionEstimator()
-    cens.fit(survival_train)
-    ipcw = cens.predict_ipcw(survival_test)
+        # fit and transform IPCW
+        cens = CensoringDistributionEstimator()
+        cens.fit(survival_train)
+        ipcw = cens.predict_ipcw(survival_test)
 
-    # expand arrays to (n_samples, n_times) shape
-    test_time = np.broadcast_to(test_time[:, np.newaxis], (n_samples, n_times))
-    test_event = np.broadcast_to(test_event[:, np.newaxis], (n_samples, n_times))
-    times_2d = np.broadcast_to(times, (n_samples, n_times))
-    ipcw = np.broadcast_to(ipcw[:, np.newaxis], (n_samples, n_times))
+        # expand arrays to (n_samples, n_times) shape
+        test_time = np.broadcast_to(test_time[:, np.newaxis], (n_samples, n_times))
+        test_event = np.broadcast_to(test_event[:, np.newaxis], (n_samples, n_times))
+        times_2d = np.broadcast_to(times, (n_samples, n_times))
+        ipcw = np.broadcast_to(ipcw[:, np.newaxis], (n_samples, n_times))
+
+        is_case = (test_time <= times_2d) & test_event
+        is_control = test_time > times_2d
+        n_controls = is_control.sum(axis=0)
+
+        surv = SurvivalFunctionEstimator()
+        surv.fit(survival_test)
+
+    elif censoring_type == "interval":
+        ...
+        # TODO ... blah, blah, blah
+    else:
+        raise ValueError("Invalid censoring_type. Must be either 'right' or 'interval'.")
 
     # sort each time point (columns) by risk score (descending)
     o = np.argsort(-estimate, axis=0)
-    test_time = np.take_along_axis(test_time, o, axis=0)
-    test_event = np.take_along_axis(test_event, o, axis=0)
     estimate = np.take_along_axis(estimate, o, axis=0)
     ipcw = np.take_along_axis(ipcw, o, axis=0)
-
-    is_case = (test_time <= times_2d) & test_event
-    is_control = test_time > times_2d
-    n_controls = is_control.sum(axis=0)
 
     # prepend row of infinity values
     estimate_diff = np.concatenate((np.broadcast_to(np.infty, (1, n_times)), estimate))
@@ -499,8 +511,6 @@ def cumulative_dynamic_auc(survival_train, survival_test, estimate, times, tied_
     if n_times == 1:
         mean_auc = scores[0]
     else:
-        surv = SurvivalFunctionEstimator()
-        surv.fit(survival_test)
         s_times = surv.predict_proba(times)
         # compute integral of AUC over survival function
         d = -np.diff(np.r_[1.0, s_times])
